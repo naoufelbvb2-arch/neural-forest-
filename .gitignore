@@ -1,0 +1,49 @@
+# Python
+*.pyc
+*.pyo
+__pycache__/
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ML artifacts
+*.pt
+*.pth
+*.safetensors
+*.bin
+*.gguf
+*.onnx
+checkpoints/
+wandb/
+runs/
+lightning_logs/
+
+# Data
+datasets/
+*.parquet
+*.arrow
+*.jsonl
+.cache/
+data/
+
+# Env
+.env
+.env.*
+venv/
+.venv/
+env/
+
+# OS
+.DS_Store
+Thumbs.db
