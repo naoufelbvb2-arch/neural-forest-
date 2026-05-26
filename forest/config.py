@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass
@@ -17,11 +17,15 @@ class ForestConfig:
         spine_head_dim: Dimension per attention head.
         num_zones: Total zones including Zone 0 (Skip). Zone 0 is always index 0.
         zone_hidden_dim: Hidden dimension inside each specialty FFN zone.
-        zone_ffn_layers: Number of linear layers inside each zone (2 or 3).
+        zone_ffn_layers: Total number of linear layers per zone (2 = d→h→d,
+            3 = d→h→h→d, etc.). Minimum 2.
         max_seq_len: Maximum sequence length (for positional encodings / KV cache).
         router_top_k: How many zones to activate per token during inference (1 or 2).
         dropout: Dropout probability (0.0 = disabled, recommended for inference).
         use_skip_zone: Whether Zone 0 (skip) is enabled during routing.
+        tie_word_embeddings: Share the token embedding matrix with the LM head
+            output projection. Saves vocab_size × embed_dim parameters with no
+            quality loss (used in GPT-2, Llama, Mistral).
     """
 
     vocab_size: int = 50_000
@@ -36,6 +40,7 @@ class ForestConfig:
     router_top_k: int = 1
     dropout: float = 0.0
     use_skip_zone: bool = True
+    tie_word_embeddings: bool = True
 
     # ---------------------------------------------------------------------------
     # Presets
@@ -43,53 +48,60 @@ class ForestConfig:
 
     @classmethod
     def tiny(cls) -> "ForestConfig":
-        """~50M parameter model for smoke testing (Phase 4.1).
+        """~61M parameter model for smoke testing (Phase 4.1).
 
-        Tuned so embedding + spine + zones + lm_head sums to ~50M.
-        spine_heads * spine_head_dim == embed_dim (320 = 8 * 40).
+        Actual param count with weight tying: ~61.3M.
+        spine_heads * spine_head_dim == embed_dim (512 = 8 * 64).
+        zone_ffn_layers=1 SwiGLU block per zone (3 matrices: gate, up, down).
         """
         return cls(
             vocab_size=50_000,
-            embed_dim=320,
+            embed_dim=512,
             spine_layers=6,
             spine_heads=8,
-            spine_head_dim=40,
+            spine_head_dim=64,
             num_zones=11,
-            zone_hidden_dim=640,
-            zone_ffn_layers=2,
+            zone_hidden_dim=1_024,
+            zone_ffn_layers=1,
             max_seq_len=2_048,
             router_top_k=1,
+            tie_word_embeddings=True,
         )
 
     @classmethod
     def small(cls) -> "ForestConfig":
-        """~125M parameter model for proof-of-concept (Phase 4.2).
+        """~130M parameter model for proof-of-concept (Phase 4.2).
 
-        spine_heads * spine_head_dim == embed_dim (576 = 9 * 64).
+        Actual param count with weight tying: ~129.7M.
+        spine_heads * spine_head_dim == embed_dim (768 = 12 * 64).
+        zone_ffn_layers=1 SwiGLU block per zone.
         """
         return cls(
             vocab_size=50_000,
-            embed_dim=576,
-            spine_layers=8,
-            spine_heads=9,
+            embed_dim=768,
+            spine_layers=6,
+            spine_heads=12,
             spine_head_dim=64,
             num_zones=11,
-            zone_hidden_dim=1_152,
-            zone_ffn_layers=2,
+            zone_hidden_dim=2_048,
+            zone_ffn_layers=1,
             max_seq_len=2_048,
             router_top_k=1,
+            tie_word_embeddings=True,
         )
 
     @classmethod
     def base(cls) -> "ForestConfig":
-        """~500M parameter model for scaling experiments (Phase 4.3).
+        """~493M parameter model for scaling experiments (Phase 4.3).
 
+        Actual param count with weight tying: ~492.7M.
         spine_heads * spine_head_dim == embed_dim (1024 = 16 * 64).
+        zone_ffn_layers=3 SwiGLU blocks per zone, zone_hidden_dim=2560.
         """
         return cls(
             vocab_size=50_000,
             embed_dim=1_024,
-            spine_layers=12,
+            spine_layers=16,
             spine_heads=16,
             spine_head_dim=64,
             num_zones=11,
@@ -97,25 +109,29 @@ class ForestConfig:
             zone_ffn_layers=3,
             max_seq_len=4_096,
             router_top_k=1,
+            tie_word_embeddings=True,
         )
 
     @classmethod
     def large(cls) -> "ForestConfig":
-        """~1B parameter model for production use (Phase 5.0).
+        """~989M parameter model for production use (Phase 5.0).
 
-        spine_heads * spine_head_dim == embed_dim (1536 = 12 * 128).
+        Actual param count with weight tying: ~989.2M.
+        spine_heads * spine_head_dim == embed_dim (1536 = 24 * 64).
+        zone_ffn_layers=3 SwiGLU blocks per zone, zone_hidden_dim=2048.
         """
         return cls(
             vocab_size=50_000,
             embed_dim=1_536,
-            spine_layers=16,
-            spine_heads=12,
-            spine_head_dim=128,
+            spine_layers=22,
+            spine_heads=24,
+            spine_head_dim=64,
             num_zones=11,
-            zone_hidden_dim=3_072,
+            zone_hidden_dim=2_048,
             zone_ffn_layers=3,
             max_seq_len=4_096,
             router_top_k=2,
+            tie_word_embeddings=True,
         )
 
     # ---------------------------------------------------------------------------
@@ -123,39 +139,42 @@ class ForestConfig:
     # ---------------------------------------------------------------------------
 
     def estimate_params(self) -> dict[str, int]:
-        """Estimate parameter counts for each component.
+        """Estimate parameter counts broken down by component.
+
+        Zone formula (SwiGLU): each zone has zone_ffn_layers SwiGLU blocks.
+        Each block has 3 weight matrices (gate d→h, up d→h, down h→d) = 3*d*h params.
+        Plus one RMSNorm weight vector (d params) per zone.
+        Total per zone: zone_ffn_layers * 3 * d * h + d.
 
         Returns:
-            Dictionary with keys: embedding, spine, zones, router, lm_head, total.
+            Dict with keys: embedding, spine, zones, router, lm_head, total.
+            When tie_word_embeddings=True, lm_head=0 (shared with embedding).
+            The sum of all values (excluding 'total') always equals total.
         """
         d = self.embed_dim
 
-        # Token embedding + positional embedding
+        # Token embedding + learned positional embedding
         embedding = self.vocab_size * d + self.max_seq_len * d
 
-        # Spine: each layer has Q,K,V,O projections + MLP (2x) + layer norms
+        # Spine: Q, K, V, O projections + MLP (4x expansion) + two LayerNorms per layer
         spine_attn_per_layer = 4 * d * (self.spine_heads * self.spine_head_dim)
-        spine_mlp_per_layer = 2 * d * (4 * d)        # 4x expansion ratio
-        spine_ln_per_layer = 2 * 2 * d               # 2 LN per layer, weight+bias
+        spine_mlp_per_layer = 2 * d * (4 * d)
+        spine_ln_per_layer = 2 * 2 * d
         spine = self.spine_layers * (
             spine_attn_per_layer + spine_mlp_per_layer + spine_ln_per_layer
         )
 
-        # Zones: num_zones FFN blocks (Zone 0 has near-zero params — skip path)
+        # Zones: Zone 0 (Skip) has no params; count (num_zones - 1) specialty zones.
+        # Each zone: zone_ffn_layers SwiGLU blocks (3 matrices each) + 1 RMSNorm weight.
         h = self.zone_hidden_dim
-        zone_params_per_zone = (
-            self.zone_ffn_layers * d * h   # linear weights
-            + (self.zone_ffn_layers - 1) * h * h   # inter-layer weights
-            + d * h                         # output projection back to d
-        )
-        # Zone 0 (skip) has effectively 0 params; count specialty zones only
+        zone_params_per_zone = self.zone_ffn_layers * 3 * d * h + d
         zones = (self.num_zones - 1) * zone_params_per_zone
 
-        # Router: linear projection from embed_dim -> num_zones
+        # Router: single linear from embed_dim to num_zones
         router = d * self.num_zones
 
-        # LM head (tied with embedding, but count separately)
-        lm_head = self.vocab_size * d
+        # LM head: vocab_size × embed_dim, or 0 if tied with embedding
+        lm_head = 0 if self.tie_word_embeddings else self.vocab_size * d
 
         total = embedding + spine + zones + router + lm_head
 
@@ -171,6 +190,9 @@ class ForestConfig:
     def estimate_vram_gb(self, batch_size: int = 1, seq_len: int = 512) -> float:
         """Rough VRAM estimate for the HOT tier (spine + embeddings) in bf16.
 
+        When tie_word_embeddings=True the LM head shares the embedding matrix,
+        so it does not contribute additional VRAM (lm_head=0 in the param dict).
+
         Args:
             batch_size: Training or inference batch size.
             seq_len: Sequence length.
@@ -179,17 +201,19 @@ class ForestConfig:
             Estimated VRAM usage in GB (bf16 = 2 bytes/param).
         """
         params = self.estimate_params()
-        # Only HOT params are always in VRAM: embedding + spine + router + lm_head
-        hot_params = params["embedding"] + params["spine"] + params["router"] + params["lm_head"]
+        hot_params = (
+            params["embedding"]
+            + params["spine"]
+            + params["router"]
+            + params["lm_head"]   # 0 when tied — no double-counting
+        )
         param_bytes = hot_params * 2  # bf16
 
-        # KV cache: 2 tensors (K, V) * spine_layers * batch * seq_len * heads * head_dim
         kv_bytes = (
             2 * self.spine_layers * batch_size * seq_len
-            * self.spine_heads * self.spine_head_dim * 2  # bf16
+            * self.spine_heads * self.spine_head_dim * 2
         )
 
-        # Activations: rough estimate (batch * seq * embed * spine_layers * 2)
         act_bytes = batch_size * seq_len * self.embed_dim * self.spine_layers * 2 * 2
 
         total_bytes = param_bytes + kv_bytes + act_bytes
@@ -198,16 +222,24 @@ class ForestConfig:
     def __repr__(self) -> str:
         params = self.estimate_params()
         total_m = params["total"] / 1e6
-        hot_m = (params["embedding"] + params["spine"] + params["router"] + params["lm_head"]) / 1e6
+        embed_m = params["embedding"] / 1e6
+        spine_m = params["spine"] / 1e6
         zone_m = params["zones"] / 1e6
         vram = self.estimate_vram_gb()
+
+        if self.tie_word_embeddings:
+            embed_str = f"embedding={embed_m:.1f}M (tied with LM head)"
+        else:
+            lm_head_m = params["lm_head"] / 1e6
+            embed_str = f"embedding={embed_m:.1f}M, lm_head={lm_head_m:.1f}M"
+
         return (
             f"ForestConfig("
-            f"total={total_m:.1f}M, "
-            f"hot={hot_m:.1f}M, "
-            f"zones={zone_m:.1f}M ({self.num_zones - 1} specialty), "
-            f"embed={self.embed_dim}, "
-            f"spine={self.spine_layers}L, "
+            f"total={total_m:.1f}M | "
+            f"{embed_str} | "
+            f"spine={spine_m:.1f}M ({self.spine_layers}L) | "
+            f"zones={zone_m:.1f}M ({self.num_zones - 1} specialty) | "
+            f"d={self.embed_dim} | "
             f"vram~{vram}GB"
             f")"
         )
