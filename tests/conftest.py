@@ -1,7 +1,14 @@
-"""Shared pytest fixtures for Neural Forest tests."""
+"""Shared pytest fixtures and markers for Neural Forest tests."""
 
 import pytest
 from forest.config import ForestConfig
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line(
+        "markers",
+        "slow: marks tests that download data or take >30 s (deselect with -m 'not slow')",
+    )
 
 
 @pytest.fixture
