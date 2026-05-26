@@ -77,6 +77,18 @@ class VRAMDelta:
     delta_allocated_gb: float
 
 
+def print_vram_summary(label: str = "VRAM Status", device: int = 0) -> None:
+    """Pretty-print current VRAM usage to stdout."""
+    stats = get_vram_usage(device)
+    print(f"--- {label} ---")
+    if stats.allocated_gb == 0.0 and stats.reserved_gb == 0.0 and stats.free_gb == 0.0:
+        print("  (CPU only — no GPU available)")
+        return
+    print(f"  Allocated : {stats.allocated_gb:.2f} GB")
+    print(f"  Reserved  : {stats.reserved_gb:.2f} GB")
+    print(f"  Free      : {stats.free_gb:.2f} GB")
+
+
 @contextlib.contextmanager
 def VRAMTracker(device: int = 0) -> Generator[VRAMDelta, None, None]:
     """Context manager that measures VRAM delta across a block.
