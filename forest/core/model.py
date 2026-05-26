@@ -72,6 +72,35 @@ class NeuralForest(nn.Module):
         )
         return sum(p.numel() for p in params)
 
+    def count_parameters(self) -> dict[str, int]:
+        """Breakdown of actual trainable parameters by component.
+
+        Returns:
+            Dict with keys: spine, router, zones, lm_head, total.
+            When weight tying is on, lm_head=0 (shared with spine embedding).
+        """
+        def _count(module: nn.Module) -> int:
+            return sum(p.numel() for p in module.parameters())
+
+        spine_count  = _count(self.spine)
+        router_count = _count(self.router)
+        zones_count  = _count(self.zones)
+
+        # lm_head shares weights with spine embedding when tied → count as 0
+        if self.config.tie_word_embeddings:
+            lm_head_count = 0
+        else:
+            lm_head_count = _count(self.lm_head)
+
+        total = spine_count + router_count + zones_count + lm_head_count
+        return {
+            "spine":   spine_count,
+            "router":  router_count,
+            "zones":   zones_count,
+            "lm_head": lm_head_count,
+            "total":   total,
+        }
+
     # ------------------------------------------------------------------
     # Forward pass
     # ------------------------------------------------------------------
