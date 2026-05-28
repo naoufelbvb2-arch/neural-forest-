@@ -42,8 +42,9 @@ class RoutingDecision:
                             Inference → (batch, seq, 2).
         logits:             Raw gate logits, shape (batch, seq, num_zones).
         load_balance_loss:  Switch-Transformer load-balancing auxiliary loss (scalar).
-                            Already multiplied by load_balance_weight (default 0.01).
-                            Add directly to the main cross-entropy loss.
+                            Raw unweighted value (range ~[1, num_zones]).
+                            Multiply by ``NeuralForest.load_balance_weight`` before
+                            adding to the cross-entropy loss.
         entropy:            Mean routing entropy (scalar). For logging only — not
                             added to loss. Low entropy = sharp specialisation.
         skip_mask:          True for tokens routed to Zone 0 (skip), shape (batch, seq).
@@ -72,12 +73,14 @@ class ForestRouter(nn.Module):
         config: ForestConfig instance.
 
     Hyperparameters (not in ForestConfig — routing-specific):
-        load_balance_weight:   Auxiliary loss coefficient (default 0.01).
         confidence_threshold:  Gap between top-2 probs that triggers Top-2 routing
                                during inference (default 0.3).
+
+    Note:
+        ``load_balance_loss`` in RoutingDecision is the *raw* unweighted loss.
+        Multiply by ``NeuralForest.load_balance_weight`` before adding to CE loss.
     """
 
-    load_balance_weight:  float = 0.01
     confidence_threshold: float = 0.3
 
     def __init__(self, config: ForestConfig) -> None:
@@ -134,7 +137,7 @@ class ForestRouter(nn.Module):
             zone_weights      = zone_weights,
             top_k_indices     = top_k_indices,
             logits            = logits,
-            load_balance_loss = load_balance_loss * self.load_balance_weight,
+            load_balance_loss = load_balance_loss,
             entropy           = entropy,
             skip_mask         = skip_mask,
         )

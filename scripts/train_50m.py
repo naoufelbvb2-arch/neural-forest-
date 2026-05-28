@@ -4,7 +4,7 @@ Usage:
     python scripts/train_50m.py
 
 Designed for CPU. Expect ~10-15 minutes on a modern laptop.
-Goal: verify loss decreases >= 30% in 200 steps on real text data.
+Goal: verify loss decreases >= 30% in 200 steps with validation logs visible.
 """
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ def main() -> dict:
     config.vocab_size = 50_257
 
     print()
-    print("NeuralForest — tiny smoke test")
+    print("NeuralForest -- tiny smoke test")
     print(f"  embed_dim    : {config.embed_dim}")
     print(f"  spine_layers : {config.spine_layers}")
     print(f"  num_zones    : {config.num_zones}")
@@ -41,11 +41,17 @@ def main() -> dict:
         print(f"  {component:10s}: {count:,}")
     print(f"  weight tied  : {model.lm_head.weight is model.spine.token_embedding.weight}")
 
-    # ── Dataset ───────────────────────────────────────────────────────
+    # ── Datasets ──────────────────────────────────────────────────────
     dataset = TinyStoriesDataset(
-        seq_len    = 256,          # shorter sequences → faster CPU steps
+        seq_len    = 256,          # shorter sequences -> faster CPU steps
         max_tokens = 500_000,      # ~500 K tokens from TinyStories
         split      = "train",
+    )
+
+    val_dataset = TinyStoriesDataset(
+        seq_len    = 256,
+        max_tokens = 50_000,       # small validation set for fast eval
+        split      = "validation",
     )
 
     dataloader = create_dataloader(
@@ -55,19 +61,37 @@ def main() -> dict:
         num_workers = 0,
     )
 
-    # ── Training ──────────────────────────────────────────────────────
-    trainer_config = TrainerConfig(
-        learning_rate  = 3e-4,
-        weight_decay   = 0.01,
-        grad_clip      = 1.0,
-        max_steps      = 200,
-        log_interval   = 10,
-        save_interval  = 100,
-        checkpoint_dir = "checkpoints",
-        seed           = 42,
+    val_dataloader = create_dataloader(
+        val_dataset,
+        batch_size  = 4,
+        shuffle     = False,
+        num_workers = 0,
     )
 
-    trainer = Trainer(model, dataloader, trainer_config)
+    # ── Training ──────────────────────────────────────────────────────
+    trainer_config = TrainerConfig(
+        learning_rate   = 3e-4,
+        weight_decay    = 0.01,
+        grad_clip       = 1.0,
+        max_steps       = 200,
+        log_interval    = 10,
+        save_interval   = 100,
+        checkpoint_dir  = "checkpoints",
+        seed            = 42,
+        # Validation: check val loss every 50 steps over 10 batches
+        val_interval    = 50,
+        val_batches     = 10,
+        # LR schedule: 20-step linear warmup then cosine decay
+        use_lr_schedule = True,
+        warmup_steps    = 20,
+        min_lr_ratio    = 0.1,
+        # lb decay: relax routing regularisation as zones specialise
+        use_lb_decay    = True,
+        lb_start_weight = 0.01,
+        lb_end_weight   = 0.003,
+    )
+
+    trainer = Trainer(model, dataloader, trainer_config, val_dataloader=val_dataloader)
     stats   = trainer.train()
 
     # ── Final checkpoint ──────────────────────────────────────────────
@@ -81,13 +105,13 @@ def main() -> dict:
     print("=" * 70)
 
     if pct > 50:
-        verdict = "PASS — loss decreased >50 %.  Architecture learns quickly."
+        verdict = "PASS -- loss decreased >50 %.  Architecture learns quickly."
     elif pct > 30:
-        verdict = "PASS — loss decreased >30 %.  Architecture learns from real data."
+        verdict = "PASS -- loss decreased >30 %.  Architecture learns from real data."
     elif pct > 10:
-        verdict = "MARGINAL — loss decreased 10-30 %.  May need more steps."
+        verdict = "MARGINAL -- loss decreased 10-30 %.  May need more steps."
     else:
-        verdict = "FAIL — loss decreased <10 %.  Investigate before scaling."
+        verdict = "FAIL -- loss decreased <10 %.  Investigate before scaling."
 
     print(f"  Decrease : {pct:.1f}%")
     print(f"  Result   : {verdict}")

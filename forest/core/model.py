@@ -57,6 +57,11 @@ class NeuralForest(nn.Module):
         if config.tie_word_embeddings:
             self.lm_head.weight = self.spine.token_embedding.weight
 
+        # Coefficient for the load-balance auxiliary loss.
+        # Stored as a plain float so the trainer (or lb_decay) can update it
+        # without touching router internals.
+        self.load_balance_weight: float = 0.01
+
     # ------------------------------------------------------------------
     # Public helpers
     # ------------------------------------------------------------------
@@ -169,8 +174,9 @@ class NeuralForest(nn.Module):
                 ignore_index=-100,
             )
 
-            # Add the Switch-Transformer load-balance auxiliary loss.
-            # routing_decision.load_balance_loss is already weighted by 0.01.
-            out["loss"] = lm_loss + routing_decision.load_balance_loss
+            # Weight the raw load-balance loss by self.load_balance_weight.
+            # The trainer (or LinearLoadBalanceDecay) can adjust this coefficient.
+            out["lm_loss"] = lm_loss
+            out["loss"]    = lm_loss + routing_decision.load_balance_loss * self.load_balance_weight
 
         return out
